@@ -6,7 +6,7 @@ class ReplayMemory():
         self.memory = deque([], maxlen=maxlen)
         
         #Optional for seed reproducability 
-        if seed is None: 
+        if seed is not None: 
             random.seed(seed)
 
     def append(self, transition): 
