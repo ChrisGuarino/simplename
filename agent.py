@@ -26,64 +26,107 @@ DATE_FORMAT = "%m-%d %H:%M:%S"
 RUNS_DIR = "runs"
 os.makedirs(RUNS_DIR, exist_ok=True)
 
+# Used to generate plots and save them as images vs. just rendering to the screen.
+matplotlib.use('Agg')
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# device = 'cpu' # To force CPU
 
 class Agent: 
     def __init__(self,hyperparameter_set):
         # Open hyperparameter config
         with open('hyperparameters.yml','r') as file: 
             all_hyperparameter_sets = yaml.safe_load(file)
-            hyperparameters = all_hyperparameter_sets[hyperparameter_set] #Gets hyperparater array from yaml 
+            hyperparameters = all_hyperparameter_sets[hyperparameter_set] # Gets hyperparater array from yaml 
 
-        #Hyperparameters
+        #Hyperparameters - Adjustable
+        self.env_id = hyperparameters['env_id']
+        self.learning_rate_a = hyperparameters['learning_rate_a'] # Learning Rate (alpha)
+        self.discount_factor_g = hyperparameters['discount_factor_g'] # Discound rate (gamma)
+        self.network_sync_rate = hyperparameters['network_sync_rate'] # Number of steps that the agent takes before syncing the policy network with the target network
         self.replay_memory_size = hyperparameters['replay_memory_size'] # Size of replay memory
         self.mini_batch_size = hyperparameters['mini_batch_size'] # size of training data set sampled from the replay memory
-        
-        # These parameters are for Epsilon-Greedy Algo
         self.epsilon_init = hyperparameters['epsilon_init'] # 1 = 100% random actions 
         self.epsilon_decay = hyperparameters['epsilon_decay'] # random decay rate
         self.epsilon_min = hyperparameters['epsilon_min'] # minimum random actions as a percentage. Policy vs random
+        self.stop_on_reward = hyperparameters['stop_on_reward'] # stop training after reaching this number of rewards
+        self.fc1_nodes = hyperparameters['fc1_nodes'] # Number of 1st Hidden layer nodes
+        self.env_make_params = hyperparameters.get('env_make_nodes',{}) # Get optional environment-specific paramters
         
-        # Optimizer Variables
+        # NN Variables
         self.loss_fn = nn.MSELoss() # NN Loss Function. MSE can be swapped to a different optimizer algo
-        self.learning_rate_a = hyperparameters['learning_rate_a']
-        self.discount_factor_g = hyperparameters['discount_factor_g']
-        self.network_sync_rate = hyperparameters['network_sync_rate'] 
+        self.optimizer = None # NN optimizer, will initize later on
+
+        # Path to Run Info
+        self.LOG_FILE = os.path.join(RUNS_DIR, f'{hyperparameter_set}.log')
+        self.MODEL_FILE = os.path.join(RUNS_DIR, f'{hyperparameter_set}.pt')
+        self.GRAPH_FILE = os.path.join(RUNS_DIR, f'{hyperparameter_set}.png')
         
     def run(self, is_training=True, render=False ):
-        # env = gymnasium.make("FlappyBird-v0", render_mode="human" if render else None, use_lidar=False)
-        env = gymnasium.make("CartPole-v1", render_mode="human" if render else None)
 
-        num_states = env.observation_space.shape[0]
+        #Logging setup
+        if is_training: 
+            start_time = datetime.now()
+            last_graph_update_time = start_time
+
+            log_message = f'{start_time.strftime(DATE_FORMAT)}: Training starting...'
+            print(log_message)
+            with open(self.LOG_FILE, 'w') as file: 
+                file.write(log_message+'\n')
+
+        #Create an instance of the environment
+        env = gym.make(self.env_id, render_mode="human" if render else None, **self.env_make_params) # **self.env_make_params is in the case you need to pass in environment specific paramters
+
+        # Number of possible actions
         num_actions = env.action_space.n
+        
+        # Get obeservation space size
+        num_states = env.observation_space.shape[0]
 
         # Epsilon Value and Rewards Logs
         rewards_per_episode = []
-        epsilon_history = []
 
-        policy_dqn = DQN(num_states, num_actions).to(device)
+        # Create policy and target networks
+        policy_dqn = DQN(num_states, num_actions, self.fc1_nodes).to(device)
 
         if is_training: 
-            memory = ReplayMemory(self.replay_memory_size)
-            
+
+            #Initialize epsilon            
             epsilon = self.epsilon_init
 
+            #Initialize replay memory
+            memory = ReplayMemory(self.replay_memory_size)
+
             #Set up the Target Network - Declares the Target Network and then  loads the current weights from the policy network.
-            target_dqn = DQN(num_states, num_actions).to(device)
+            target_dqn = DQN(num_states, num_actions, self.fc1_nodes).to(device)
             target_dqn.load_state_dict(policy_dqn.state_dict())
+            
+            # Policy Network Optimizer. Using Adam here but can be swapped with something else
+            self.optimizer = torch.optim.Adam(policy_dqn.parameters(), lr=self.learning_rate_a)
+            
+            # List to keep track of epsilon decay
+            epsilon_history = []
 
             #Track Number of steps taken. Used for syncing policy with target
             step_count = 0
 
-            # Policy Network Optimizer. Using Adam here but can be swapped with something else
-            self.optimizer = torch.optim.Adam(policy_dqn.parameters(), lr=self.learning_rate_a)
+            # Track best reward 
+            best_reward = -9999999
+        
+        else: 
+            # Load learned policy 
+            policy_dqn.load_state_dict(torch.load(self.MODEL_FILE))
 
+            # Switch to evaluation mode 
+            policy_dqn.eval()
+
+        # Training Loop, runs indefinately until manual stop
         for episode in itertools.count(): 
-            state, _ = env.reset()
-            state = torch.tensor(state, dtype=torch.float, device=device)
+            state, _ = env.reset() # Initialize the environment. Rest returns (state,info)
+            state = torch.tensor(state, dtype=torch.float, device=device) # Convert state to tensor directly on the device
 
-            terminated = False
-            episode_reward = 0.0
+            terminated = False # True when the agent reaches it's goal or fails
+            episode_reward = 0.0 # Used to accumulate rewards per episode
 
             while not terminated: # Checking if the player is still alive - Episode Loop
                 
@@ -118,6 +161,23 @@ class Agent:
             
             # Update episode reward log
             rewards_per_episode.append(episode_reward)
+
+            # Save model when new best reward is achieved
+            if is_training: 
+                if episode_reward > best_reward: 
+                    log_message = f'{datetime.now().strftime(DATE_FORMAT)}: New Best Reward {episode_reward:0.1f}({episode_reward-best_reward})'
+                    print(log_message)
+                    with open(self.LOG_FILE, 'a') as file: 
+                        file.write(log_message + '\n')
+
+                    torch.save(policy_dqn.state_dict(), self.MODEL_FILE)
+                    best_reward = episode_reward
+
+                # Update graph every x seconds
+                current_time = datetime.now() 
+                if current_time - last_graph_update_time > timedelta(seconds=10): 
+                    self.save_graph(rewards_per_episode, epsilon_history)
+                    last_graph_update_time = current_time
 
             #Update Epsilon-Greedy and History
             epsilon = max(epsilon * self.epsilon_decay, self.epsilon_min)
