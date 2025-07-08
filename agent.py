@@ -16,7 +16,6 @@ from datetime import datetime, timedelta
 import argparse 
 import itertools
 
-import flappy_bird_gymnasium
 import os
 
 # For printing date and time 
@@ -52,6 +51,7 @@ class Agent:
         self.stop_on_reward = hyperparameters['stop_on_reward'] # stop training after reaching this number of rewards
         self.fc1_nodes = hyperparameters['fc1_nodes'] # Number of 1st Hidden layer nodes
         self.env_make_params = hyperparameters.get('env_make_nodes',{}) # Get optional environment-specific paramters
+        self.enable_double_dqn = hyperparameters['enable_double_dqn'] # Double DQN on/off
         
         # NN Variables
         self.loss_fn = nn.MSELoss() # NN Loss Function. MSE can be swapped to a different optimizer algo
@@ -69,7 +69,7 @@ class Agent:
             start_time = datetime.now()
             last_graph_update_time = start_time
 
-            log_message = f'{start_time.strftime(DATE_FORMAT)}: Training starting...'
+            log_message = f'{start_time.strftime(DATE_FORMAT)}: Training starting on {device}...'
             print(log_message)
             with open(self.LOG_FILE, 'w') as file: 
                 file.write(log_message+'\n')
@@ -128,13 +128,15 @@ class Agent:
             terminated = False # True when the agent reaches it's goal or fails
             episode_reward = 0.0 # Used to accumulate rewards per episode
 
-            while not terminated: # Checking if the player is still alive - Episode Loop
+            while(not terminated and episode_reward < self.stop_on_reward): # Checking if the player is still alive - Episode Loop
                 
                 #Epsilon-Greedy Implementation Loop - Random Action or Policy Action
                 if is_training and random.random() < epsilon: 
+                    # Select a random action
                     action = env.action_space.sample() # If the random generated (0-1) is less than the continually degrading epsilon value, take a random action. 
                     action = torch.tensor(action, dtype=torch.int64, device=device)
                 else: 
+                    # Select the best action
                     with torch.no_grad(): #Dont need a gradient decent calc here so we are turning it off to save comp.
                         # Need to add dimensionality for pytorch. 1d -> 2d to process with policy and then can reduce to 1d before getting index of action to be taken.
                         action = policy_dqn(state.unsqueeze(dim=0)).squeeze().argmax() # If epsilon is lesser than the random number execute on policy. This will constatly be tuned with every episode. We get the index of the action that has the largest Q-Value (future reward)
@@ -165,7 +167,7 @@ class Agent:
             # Save model when new best reward is achieved
             if is_training: 
                 if episode_reward > best_reward: 
-                    log_message = f'{datetime.now().strftime(DATE_FORMAT)}: New Best Reward {episode_reward:0.1f}({episode_reward-best_reward})'
+                    log_message = f'{datetime.now().strftime(DATE_FORMAT)}: New Best Reward {episode_reward:0.1f}(+{episode_reward-best_reward}) at episode {episode}'
                     print(log_message)
                     with open(self.LOG_FILE, 'a') as file: 
                         file.write(log_message + '\n')
@@ -195,6 +197,31 @@ class Agent:
                     target_dqn.load_state_dict(policy_dqn.state_dict()) #This will copy all of the weights from policy_dqn to target_dqn. 
                     step_count=0 # Reset the step count
 
+    def save_graph(self, rewards_per_episode, epsilon_history):
+        #Save plots 
+        fig = plt.figure(1)
+
+        # Plot average rewards (Y-axis) vs episodes (X-axis)
+        mean_rewards = np.zeros(len(rewards_per_episode))
+        for x in range(len(mean_rewards)):
+            mean_rewards[x] = np.mean(rewards_per_episode[max(0,x-99):(x+1)])
+        plt.subplot(121) #plot on 1 row x 2 col grid, at cell 1
+        # plt.xlabel('Episodes')
+        plt.ylabel('Mean Rewards')
+        plt.plot(mean_rewards)
+
+        # Plot epsilon decay (Y-axis) vs episodes (X-axis)
+        plt.subplot(122) #plot on 1 row x 2 col grid, at cell 2
+        # plt.xlabel('Time Steps')
+        plt.ylabel('Epsilon Decay')
+        plt.plot(epsilon_history)
+
+        plt.subplots_adjust(wspace=1.0, hspace=1.0)
+
+        #Save Plots 
+        fig.savefig(self.GRAPH_FILE)
+        plt.close(fig)
+
     def optimize(self, mini_batch, policy_dqn, target_dqn): 
         #Transpose the list of experiences and separate each element 
         states, actions, new_states, rewards, terminations = zip(*mini_batch)
@@ -208,8 +235,14 @@ class Agent:
         terminations = torch.tensor(terminations).float().to(device)
 
         with torch.no_grad(): 
-            #Calculate the target Q-values (expected returns)
-            target_q = rewards + (1-terminations) * self.discount_factor_g * target_dqn(new_states).max(dim=1)[0]
+            # Checks for Double DQN
+            if self.enable_double_dqn: 
+                best_actions_from_policy = policy_dqn(new_states).argmax(dim=1)
+                target_q = rewards + (1-terminations) * self.discount_factor_g * target_dqn(new_states).gather(dim=1, index=best_actions_from_policy.unsqueeze(dim=1)).squeeze()
+
+            else: 
+                #Calculate the target Q-values (expected returns) - Regular DQN
+                target_q = rewards + (1-terminations) * self.discount_factor_g * target_dqn(new_states).max(dim=1)[0]
 
         #Calculate Q-values from current policy
         current_q = policy_dqn(states).gather(dim=1, index=actions.unsqueeze(dim=1)).squeeze() 
@@ -223,5 +256,15 @@ class Agent:
         self.optimizer.step() #Update network parameters i.e. weights and biases
 
 if __name__ == '__main__': 
-    agent = Agent('CartPole1')
-    agent.run(is_training=True, render=True)
+    # Parse command line inputs 
+    parser = argparse.ArgumentParser(description='Train or test model.')
+    parser.add_argument('hyperparameters', help='')
+    parser.add_argument('--train', help='Training mode', action='store_true')
+    args = parser.parse_args()
+
+    dql = Agent(hyperparameter_set=args.hyperparameters)
+
+    if args.train:
+        dql.run(is_training=True)
+    else: 
+        dql.run(is_training=False, render=True)

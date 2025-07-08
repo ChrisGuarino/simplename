@@ -10,8 +10,9 @@ cartpole1:
   discount_factor_g: 0.99
   stop_on_reward: 100000
   fc1_nodes: 10
+  enable_double_dqn: True
 
-  flappybird1:
+flappybird1:
   env_id: FlappyBird-v0
   replay_memory_size: 100000
   mini_batch_size: 32 
@@ -25,4 +26,5 @@ cartpole1:
   fc1_nodes: 512
   env_make_params: 
     use_lidar: False
+  enable_double_dqn: True
 
