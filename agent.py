@@ -75,6 +75,7 @@ class Agent:
                 file.write(log_message+'\n')
 
         #Create an instance of the environment
+        print(f'Environment: {self.env_id}')
         env = gym.make(self.env_id, render_mode="human" if render else None, **self.env_make_params) # **self.env_make_params is in the case you need to pass in environment specific paramters
 
         # Number of possible actions
