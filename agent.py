@@ -17,6 +17,7 @@ import argparse
 import itertools
 
 import os
+import flappy_bird_gymnasium
 
 # For printing date and time 
 DATE_FORMAT = "%m-%d %H:%M:%S"
