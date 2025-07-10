@@ -11,6 +11,7 @@ cartpole1:
   stop_on_reward: 100000
   fc1_nodes: 10
   enable_double_dqn: True
+  enable_dueling_dqn: True
 
 flappybird1:
   env_id: FlappyBird-v0
@@ -27,4 +28,5 @@ flappybird1:
   env_make_params: 
     use_lidar: False
   enable_double_dqn: True
+  enable_dueling_dqn: True
 
